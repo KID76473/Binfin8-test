@@ -1,15 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
-import 'package:audioplayers/audioplayers.dart';
 import 'dart:developer';
-import 'dart:io';
-// import 'package:path_provider/path_provider.dart';
-import 'dart:typed_data';
 import 'dart:html' as html;
-// import 'package:just_audio/just_audio.dart';
-
-
+import 'dart:ui' as ui;
 
 void main() => runApp(MyApp());
 
@@ -17,12 +11,11 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter HTTP Request Example',
-      theme: ThemeData(
-        primarySwatch: Colors.blue,
-      ),
-      home: MyHomePage(),
-    );
+        title: 'Flutter HTTP Request Example',
+        theme: ThemeData(
+          primarySwatch: Colors.blue,
+        ),
+        home: MyHomePage());
   }
 }
 
@@ -36,44 +29,49 @@ class MyHomePage extends StatefulWidget {
 class _MyHomePageState extends State<MyHomePage> {
   final _formKey = GlobalKey<FormState>();
   String _userInput = '';
-  late String _audioUrl;
   bool _fileGenerated = false;
   bool _fileGenerating = false;
-  bool _isPlaying = false;
-  Duration _duration = Duration.zero;
-  Duration _position = Duration.zero;
-  late AudioPlayer _audioPlayer;
+  late html.AudioElement _audioElement;
+  double _currentPosition = 0.0;
+  double _duration = 0.0;
+  bool _isSeeking = false;
+  double _temperature = 0.2;
+  double _top_p = 0.7;
+  int _top_k = 20;
 
   // Function to send an HTTP request using the input
-  Future<void> sendHttpRequest(String input) async {
-    debugPrint('$input from sendHttpRequest');
+  Future<void> sendHttpRequest(String input_text, double temperature, double top_p, int top_k) async {
+    debugPrint('$input_text from sendHttpRequest');
     setState(() {
       _fileGenerating = true;
       _fileGenerated = false;
     });
-    String local = 'http://127.0.0.1:5000/generate_audio?text=$input';
+    String local = 'http://127.0.0.1:5000/generate_audio?text=$input_text&temperature=$temperature&top_p=$top_p&top_k=$top_k';
     final url = Uri.parse(local);
 
     try {
-      // debugPrint('before http.get');
       http.Response response = await http.get(url);
-      // debugPrint('This is status code: ${response.statusCode}');
       if (response.statusCode == 200) {
         // Access the binary data
         final bytes = response.bodyBytes;
 
-        // Create a Blob from the bytes
-        final blob = html.Blob([bytes], 'audio/wav');
+        // Convert bytes to Base64 data URL
+        String base64Audio = base64Encode(bytes);
+        String dataUrl = 'data:audio/wav;base64,$base64Audio';
 
-        // Generate a URL for the Blob
-        final audioUrl = html.Url.createObjectUrlFromBlob(blob);
+        debugPrint("Audio Data URL created.");
 
-        debugPrint("Audio URL created: $audioUrl");
+        // Set the source of the audio element
+        _audioElement.src = dataUrl;
+
+        // Reset the audio element
+        _audioElement.pause();
+        _audioElement.currentTime = 0;
 
         setState(() {
+          _currentPosition = 0.0;
           _fileGenerating = false;
           _fileGenerated = true;
-          _audioUrl = audioUrl; // Store the URL for playback
         });
       } else {
         log('Failed to send request: ${response.statusCode}');
@@ -92,70 +90,53 @@ class _MyHomePageState extends State<MyHomePage> {
   @override
   void initState() {
     super.initState();
-    _audioPlayer = AudioPlayer();
-  
-    // Listen to audio player state changes
-    _audioPlayer.onPlayerStateChanged.listen((PlayerState state) {
+
+    // Initialize the HTML5 audio element
+    _audioElement = html.AudioElement()
+      ..controls = false // We will create custom controls
+      ..style.width = '100%';
+
+    // Listen to duration change events
+    _audioElement.onDurationChange.listen((event) {
       setState(() {
-        _isPlaying = state == PlayerState.PLAYING;
+        _duration = (_audioElement.duration).toDouble();
       });
     });
 
-    // Listen to audio duration changes
-    _audioPlayer.onDurationChanged.listen((Duration duration) {
-      setState(() {
-        _duration = duration;
-      });
+    // Listen to time update events
+    _audioElement.onTimeUpdate.listen((event) {
+      if (!_isSeeking) {
+        setState(() {
+          _currentPosition = (_audioElement.currentTime).toDouble();
+        });
+      }
     });
 
-    // Listen to audio position changes
-    _audioPlayer.onAudioPositionChanged.listen((Duration position) {
-      setState(() {
-        _position = position;
-      });
-    });
+    // Register the view factory
+    // ignore: undefined_prefixed_name
+    ui.platformViewRegistry.registerViewFactory(
+      'audioElement',
+      (int viewId) => _audioElement,
+    );
   }
 
   @override
   void dispose() {
-    _audioPlayer.dispose();
+    _audioElement.pause();
+    _audioElement.src = '';
     super.dispose();
   }
 
-  void _playAudio() async {
-    if (_audioUrl != null) {
-      int result = await _audioPlayer.play(_audioUrl!);
-      if (result == 1) {
-        // Successfully started playing
-        debugPrint('Audio started playing.');
-      } else {
-        // Error playing audio
-        debugPrint('Error playing audio.');
-      }
-    } else {
-      debugPrint('Audio URL is not available.');
-    }
-  }
-
-  void _pauseAudio() async {
-    int result = await _audioPlayer.pause();
-    if (result == 1) {
-      // Successfully paused
-      debugPrint('Audio paused.');
-    } else {
-      // Error pausing audio
-      debugPrint('Error pausing audio.');
-    }
-  }
-
-
-  String _formatDuration(Duration duration) {
+  String _formatDuration(double seconds) {
+    Duration duration = Duration(seconds: seconds.round());
     String twoDigits(int n) => n.toString().padLeft(2, '0');
     return '${twoDigits(duration.inMinutes.remainder(60))}:${twoDigits(duration.inSeconds.remainder(60))}';
   }
 
   @override
   Widget build(BuildContext context) {
+    bool isPlaying = !_audioElement.paused;
+
     return Scaffold(
       appBar: AppBar(
         title: Text('Natural Language Generator'),
@@ -178,91 +159,168 @@ class _MyHomePageState extends State<MyHomePage> {
                   return null;
                 },
               ),
-              const SizedBox(height: 60),
+              const SizedBox(height: 30),
+              Row(
+                children: [
+                  Column(
+                    children:[
+                      const Text('Temperature:'),
+                      SizedBox(
+                        width: 250,
+                        child: Slider(
+                          value: _temperature,
+                          min: 0,
+                          max: 1,
+                          divisions: 10,
+                          label: _temperature.toString(),
+                          onChanged: (double value) {
+                            setState(() {
+                              _temperature = value;
+                            });
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Top P value:'),
+                        SizedBox(
+                          width: 250,
+                          child: Slider(
+                            value: _top_p,
+                            min: 0,
+                            max: 1,
+                            divisions: 10,
+                            label: _top_p.toString(),
+                            onChanged: (double value) {
+                              setState(() {
+                                _top_p = value;
+                              });
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  SizedBox(width: 20), // Adding some space between the components
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('Top K value:'),
+                      SizedBox(
+                        width: 100,
+                        child: TextFormField(
+                          decoration: const InputDecoration(
+                            labelText: 'Enter a value',
+                          ),
+                          onSaved: (value) {
+                            _top_k = int.parse(value ?? "");
+                          },
+                          validator: (value) {
+                            if (value == null || value.isEmpty || int.parse(value) <= 0) {
+                              return 'Please input a top k value greater than 0';
+                            }
+                            return null;
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              const SizedBox(height: 30),
               ElevatedButton(
                 onPressed: () {
                   if (_formKey.currentState!.validate()) {
                     _formKey.currentState!.save();
-                    // Call the function to send the HTTP request with user input
-                    sendHttpRequest(_userInput).then((_) {
-                      // // After the HTTP request is completed, use setState to update the UI
-                      // setState(() {
-                      //   // Ensure that _fileGenerated and _filename are updated to trigger rerender
-                      //   _fileGenerated = true;  // Assuming the request was successful
-                      //   _fileUrl = 'http://127.0.0.1:5000/get_audio?filename=' + _filename;
-                      // });
-                    });
+                    sendHttpRequest(_userInput, _temperature, _top_p, _top_k);
                   }
                 },
                 child: const Text('Generate'),
               ),
+              const SizedBox(height: 20),
               _fileGenerating
-                ? const Text(
-                  "File generating...",
-                  style: TextStyle(fontSize: 18),
-                )
-                : _fileGenerated
-                  ? Column(
-                    children: [
-                      // Display the audio file box
-                      Container(
-                        padding: EdgeInsets.all(16),
-                        decoration: BoxDecoration(
-                          border: Border.all(color: Colors.blueAccent),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Column(
+                  ? const Text(
+                      "File generating...",
+                      style: TextStyle(fontSize: 18),
+                    )
+                  : _fileGenerated
+                      ? Column(
                           children: [
-                            const Text(
-                              'Audio',
-                              style: TextStyle(fontSize: 18),
-                            ),
-                            SizedBox(height: 50),
-                            // Play/Pause button
-                            IconButton(
-                              icon: Icon(
-                                _isPlaying ? Icons.pause : Icons.play_arrow,
+                            // Custom audio player controls
+                            Container(
+                              padding: EdgeInsets.all(16),
+                              decoration: BoxDecoration(
+                                border: Border.all(color: Colors.blueAccent),
+                                borderRadius: BorderRadius.circular(8),
                               ),
-                              iconSize: 48,
-                              onPressed: () {
-                                // _isPlaying ? _pauseAudio() : _playAudio();
-                                if (_isPlaying) {
-                                  _pauseAudio();
-                                } else {
-                                  _playAudio();
-                                }
-                              },
-                            ),
-                            // Progress bar
-                            Slider(
-                              activeColor: Colors.blue,
-                              inactiveColor: Colors.grey,
-                              value: _position.inSeconds.toDouble().clamp(0.0, (_duration.inSeconds.toDouble() > 0 ? _duration.inSeconds.toDouble() : 1.0)),
-                              min: 0.0,
-                              max: _duration.inSeconds.toDouble() > 0 ? _duration.inSeconds.toDouble() : 1.0,
-                              onChanged: (double value) {
-                                final position = Duration(seconds: value.toInt());
-                                _audioPlayer.seek(position);
-                              },
-                            ),
-                            // Display duration and position
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Text(_formatDuration(_position)),
-                                Text(_formatDuration(_duration)),
-                              ],
+                              child: Column(
+                                children: [
+                                  const Text(
+                                    'Audio',
+                                    style: TextStyle(fontSize: 18),
+                                  ),
+                                  const SizedBox(height: 20),
+                                  // Play/Pause button
+                                  IconButton(
+                                    icon: Icon(
+                                      isPlaying ? Icons.pause : Icons.play_arrow,
+                                    ),
+                                    iconSize: 48,
+                                    onPressed: () {
+                                      setState(() {
+                                        if (isPlaying) {
+                                          _audioElement.pause();
+                                        } else {
+                                          _audioElement.play();
+                                        }
+                                      });
+                                    },
+                                  ),
+                                  // Progress bar
+                                  Slider(
+                                    activeColor: Colors.blue,
+                                    inactiveColor: Colors.grey,
+                                    value: _currentPosition.clamp(0.0, _duration),
+                                    min: 0.0,
+                                    max: _duration > 0.0 ? _duration : 1.0,
+                                    onChangeStart: (value) {
+                                      setState(() {
+                                        _isSeeking = true;
+                                      });
+                                    },
+                                    onChanged: (double value) {
+                                      setState(() {
+                                        _currentPosition = value;
+                                      });
+                                    },
+                                    onChangeEnd: (value) {
+                                      _audioElement.currentTime = value;
+                                      setState(() {
+                                        _isSeeking = false;
+                                      });
+                                    },
+                                  ),
+                                  // Display duration and position
+                                  Row(
+                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Text(_formatDuration(_currentPosition)),
+                                      Text(_formatDuration(_duration)),
+                                    ],
+                                  ),
+                                ],
+                              ),
                             ),
                           ],
+                        )
+                      : const Text(
+                          'Type something and click the button to generate an audio file!',
+                          style: TextStyle(fontSize: 18),
                         ),
-                      ),
-                    ],
-                  )
-                  : const Text(
-                    'Type something and click the button to generate an audio file!',
-                    style: TextStyle(fontSize: 18),
-                  ),
-            // const SizedBox(height: 20),
             ],
           ),
         ),
